@@ -1,3 +1,6 @@
+from sqlitesearch import vector
+
+
 INSTRUCTIONS = '''
 Your task is to answer questions from the course participants
 based on the provided context.
@@ -48,7 +51,9 @@ class RAGBase:
         lines = []
 
         for doc in search_results:
-            lines.append(doc['content'])
+            lines.append(doc['section'])
+            lines.append('Q: ' + doc['question'])
+            lines.append('A: ' + doc['answer'])
             lines.append('')
 
         return '\n'.join(lines).strip()
@@ -77,3 +82,49 @@ class RAGBase:
         prompt = self.build_prompt(query, search_results)
         answer = self.llm(prompt)
         return answer
+
+class RAGVector(RAGBase):
+
+    def __init__(self, embedder, **kwargs):
+        super().__init__(**kwargs)
+        self.embedder = embedder
+
+    def search(self, query, num_results=5):
+        query_vector = self.embedder.encode(query)
+        filter_dict = {"course": self.course}
+
+        return self.index.search(
+            query_vector,
+            num_results=num_results,
+            filter_dict=filter_dict
+        )
+
+class RAGPgVector(RAGBase):
+
+    def __init__(self, embedder, conn, **kwargs):
+        super().__init__(index=None, **kwargs)
+        self.embedder = embedder
+        self.conn = conn
+
+    def vec_to_str(self, vector):
+        return "[" + ",".join(str(x) for x in vector) + "]"
+
+    def search(self, query, num_results=5):
+        query_vector = self.embedder.encode(query)
+        query_str = self.vec_to_str(query_vector)
+
+        rows = self.conn.execute(
+            """
+            SELECT course, section, question, answer
+            FROM documents
+            WHERE course = %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (self.course, query_str, num_results)
+        ).fetchall()
+
+        return [
+            {"course": r[0], "section": r[1], "question": r[2], "answer": r[3]}
+            for r in rows
+        ]
